@@ -1,65 +1,139 @@
 import pandas as pd
 import json
-from run_prompt import execute_gemini
+from time import sleep
+from run_prompt import (
+    execute_gemini_for_tweet_creation,
+    execute_gemini_for_tweet_prediction
+)
 
-# Function to select top 5 tweets by engagement type
-def top_5_selection(analyzed_tweets, engagement_type: str):
+# Models to use
+MODEL_A = "gemini-2.5-flash-lite"
+MODEL_B = "gemini-2.5-flash"
+
+
+# Function to select top 5 tweets by engagement
+def top_5_selection(analyzed_tweets, engagement_type):
     df = pd.DataFrame(analyzed_tweets)
-    filtered_df = df[df['engagement_type'].str.lower() == engagement_type.lower()]
-    return filtered_df.nlargest(5, columns=['engagement_score']).values.tolist()
 
-# Function to create a new tweet
-def create_tweet(analyzed_tweets):
-    # Prompt with enforced JSON schema
-    prompt = """
-    You are a social media assistant.
-    Task: Write a ready-to-post tweet for the newly releasing iPhone 17 Pro Max 
-    with the A18 Pro SoC and physically moving camera zoom.
-    The tweet must be short, catchy, and appealing to camera enthusiasts.
+    if isinstance(engagement_type, (tuple, list)):
+        filtered_df = df[df['engagement_type'].str.lower().isin([e.lower() for e in engagement_type])]
+    else:
+        filtered_df = df[df['engagement_type'].str.lower() == engagement_type.lower()]
 
-    ⚠️ IMPORTANT: Return ONLY valid JSON in this structure (all fields required):
-    {
-      "tweet_text": "string",
-      "sentiment_type": "string",
-      "engagement_type": "string",
-      "sentiment_score": number,
-      "topic": "string",
-      "reason_for_engagement": "string",
-      "engagement_score": number,
-      "keywords": ["string"],
-      "target_audience": "string"
-    }
-    """
+    # Sort by engagement_score
+    top5 = filtered_df.nlargest(5, columns=['engagement_score'])
 
-    engagement_type = "Like"
-    top_5_tweets = top_5_selection(analyzed_tweets, engagement_type)
+    # Return tweets
+    if 'tweet' in top5.columns:
+        return top5['tweet'].tolist()
+    elif 'text' in top5.columns:
+        return top5['text'].tolist()
+    else:
+        return top5.astype(str).values.tolist()
 
-    system_prompt = f"""
-    Create an engaging Twitter post for my tech company.
-    PROMPT: {prompt}
-    Here are my top performing tweets for reference:
-    {top_5_tweets}
-    """
 
-    response = execute_gemini(system_prompt)
-    return response
 
-if __name__ == "__main__":
+# Main tweet creation function (mentor-style)
+def create_tweet(prompt: str):
+    # Load analyzed tweets from file
     with open("analyzed_tweets.json", "r", encoding="utf-8") as f:
         analyzed_tweets = json.load(f)
 
-    tweet = create_tweet(analyzed_tweets)
-    print("✅ Generated Tweet:\n", tweet)
+    engagement_type = ("like", "retweet")  # or use ["like", "retweet"]
 
-    try:
-        tweet_json = json.loads(tweet)
+    top_5_tweets = top_5_selection(analyzed_tweets, engagement_type)
+    top_5_text = "\n".join([f"- {t}" for t in top_5_tweets])
 
-        # Fallback: if tweet_text missing, auto-generate from topic + keywords
-        if "tweet_text" not in tweet_json or not tweet_json["tweet_text"].strip():
-            keywords_str = " ".join(tweet_json.get("keywords", []))
-            tweet_json["tweet_text"] = f"🚀 The new {tweet_json.get('topic','iPhone 17 Pro Max')} is here! {keywords_str}"
+    # System prompt for tweet generation
+    system_prompt = f"""
+    You are a top-tier social media strategist for a leading tech company.  
+Your job is to craft **viral, high-engagement tweets** that are short, punchy, and optimized for X/Twitter’s audience.  
 
-        print("\n📢 Ready-to-post Tweet:\n", tweet_json["tweet_text"])
+PROMPT: {prompt}  
 
-    except Exception as e:
-        print("\n❌ Error parsing JSON:", e)
+Here are example tweets from competitors that performed extremely well (high likes, retweets, impressions):  
+{top_5_text}  
+
+✅ Guidelines:  
+- Write in a **casual, human-like, and exciting tone**.  
+- Use **emojis** sparingly but effectively (if relevant).  
+- Keep the tweet **within 280 characters**.  
+- The tweet must be **clear, engaging, and relatable**.  
+- Avoid sounding robotic, corporate, or generic.  
+- If relevant, use trending hashtags or cultural references.  
+- Focus on what would make a user **stop scrolling and engage** (like, reply, or retweet).  
+
+⚠️ Output Format:  
+Return only valid JSON in this structure:  
+
+    {{"tweet": "string"}}
+
+
+    """
+
+    # Generate Tweet A
+    out_a = execute_gemini_for_tweet_creation(prompt=system_prompt, model=MODEL_A)
+    out_dict_a = json.loads(out_a) if isinstance(out_a, str) else out_a
+    tweet_a = out_dict_a.get("tweet", "⚠️ Tweet A not generated.")
+    print("TWEET_A ======>")
+    print(tweet_a)
+    sleep(2)
+
+    # Generate Tweet B
+    out_b = execute_gemini_for_tweet_creation(prompt=system_prompt, model=MODEL_B)
+    out_dict_b = json.loads(out_b) if isinstance(out_b, str) else out_b
+    tweet_b = out_dict_b.get("tweet", "⚠️ Tweet B not generated.")
+    print("TWEET_B ======>")
+    print(tweet_b)
+    sleep(2)
+
+    # Comparison prompt
+    prompt_for_comparing = f"""
+    You are given two tweets generated by different AI models.
+    Tweet A: {tweet_a}
+    Tweet B: {tweet_b}
+    Your task is to compare both tweets with the sample set of best performing tweets:
+    {top_5_text}
+    Compare based on:
+    - Engagement (attention, likes, shares, comments)
+    - Relevance (topic/context alignment)
+    - Audience relativeness
+    Provide JSON:
+    {{
+      "tweet_a_vs_tweet_b": "string",
+      "prediction": "string",
+      "explanation": "string"
+    }}
+    """
+
+    # Run comparison
+    prediction_res = execute_gemini_for_tweet_prediction(prompt=prompt_for_comparing, model=MODEL_A)
+    out_prediction = json.loads(prediction_res) if isinstance(prediction_res, str) else prediction_res
+
+    tweet_a_vs_tweet_b = out_prediction.get("tweet_a_vs_tweet_b", "⚠️ No comparison generated.")
+    prediction = out_prediction.get("prediction", "⚠️ No prediction.")
+    explanation = out_prediction.get("explanation", "⚠️ No explanation.")
+
+    print("TWEET A VS B ======>")
+    print(tweet_a_vs_tweet_b)
+    print("PREDICTION ======>")
+    print(prediction)
+    print("EXPLANATION ======>")
+    print(explanation)
+
+    # ✅ Return tweets too (mentor-style full return)
+    return {
+        "tweet_a": tweet_a,
+        "tweet_b": tweet_b,
+        "tweet_a_vs_tweet_b": tweet_a_vs_tweet_b,
+        "prediction": prediction,
+        "explanation": explanation
+    }
+
+
+if __name__ == "__main__":
+    # Quick test
+    result = create_tweet("Launch of iPhone 17 Pro Max with A18 Pro SoC and new zoom camera")
+    with open("tweet_candidates.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=4, ensure_ascii=False)
+    print("\n✅ Candidate tweets + comparison saved to tweet_candidates.json")
